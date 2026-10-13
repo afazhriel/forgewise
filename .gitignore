@@ -1,0 +1,37 @@
+# Virtual environment
+.venv/
+venv/
+
+# Secrets / credentials — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated model artifacts (reproducible from code)
+# Model binaries are excluded; small reproducibility records are kept.
+models/*
+!models/.gitkeep
+!models/model_metadata.json
+artifacts/*
+!artifacts/.gitkeep
+!artifacts/metrics.json
+!artifacts/confusion_matrix.png
+!artifacts/roc_pr_curves.png
+
+# Downloaded raw datasets (acquired from official source, see README)
+data/*
+!data/.gitkeep
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

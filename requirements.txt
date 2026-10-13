@@ -1,0 +1,12 @@
+# ForgeWise — runtime + development dependencies
+# Python 3.12.x (tested on 3.12.10). Versions pinned after installation (see README).
+pandas==3.0.6
+numpy==2.5.4
+scikit-learn==1.9.1
+joblib==1.6.0
+matplotlib==3.11.2
+streamlit==1.65.0
+pytest==9.1.1
+
+# Optional — Gemini report generation (falls back to an offline template if absent).
+google-genai==2.30.0
