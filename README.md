@@ -75,6 +75,9 @@ joblib, matplotlib, streamlit, pytest, and the optional `google-genai`.
 # 3. Evaluate on the held-out test split (writes artifacts/metrics.json + figures)
 .\.venv\Scripts\python.exe -m src.evaluate_model
 
+# 3b. Select a threshold on a validation split (writes artifacts/threshold_analysis.json)
+.\.venv\Scripts\python.exe -m src.calibrate_threshold
+
 # 4. Run the test suite
 .\.venv\Scripts\python.exe -m pytest -q
 
@@ -122,6 +125,29 @@ PR-AUC are the informative metrics here. These numbers are **not** claims about
 real-world plant performance; production use would require calibration, a
 representative dataset, and threshold selection tied to maintenance costs.
 
+### Threshold calibration (validation-selected, no test-set tuning)
+
+The 0.5 threshold above is an arbitrary default. `src/calibrate_threshold.py`
+selects a threshold on a **validation** split carved out of the *training pool*
+and reports its effect on the untouched held-out test set. The held-out test
+indices are never used to choose the threshold, and `artifacts/metrics.json` is
+left unchanged. Selected threshold: **0.20** (by maximising validation F1; ties
+break toward recall). Results (`artifacts/threshold_analysis.json`):
+
+| Split | Threshold | Precision | Recall | F1 | TN | FP | FN | TP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Validation | 0.50 | 0.893 | 0.368 | 0.521 | 1929 | 3 | 43 | 25 |
+| Validation | **0.20** | 0.639 | 0.779 | 0.702 | 1902 | 30 | 15 | 53 |
+| Held-out test (reference) | 0.50 | 0.933 | 0.412 | 0.571 | 1930 | 2 | 40 | 28 |
+| Held-out test (reference) | **0.20** | 0.581 | 0.794 | 0.671 | 1893 | 39 | 14 | 54 |
+
+Moving to 0.20 roughly **doubles recall** (0.41 → 0.79 on the held-out set) at
+the cost of precision — the right trade for maintenance, where a missed failure
+is far costlier than an unnecessary inspection. The app's risk bands
+(LOW `< 0.30`, HIGH `>= 0.70`) are a **separate documented policy** and are not
+changed automatically by this analysis; the calibration is shown in the app's
+Diagnostics tab for transparency.
+
 ---
 
 ## 6. The Missing Evidence Engine
@@ -149,10 +175,40 @@ representative dataset, and threshold selection tied to maintenance costs.
 | TWF — tool wear | tool wear in the 200–240 min band |
 
 Policy thresholds (documented, not learned): low `< 0.30`, high `>= 0.70`,
-inconclusive band `[0.30, 0.70]`, stale after `60` minutes.
+inconclusive band `[0.30, 0.70]`, stale after `60` minutes. (These routing bands
+are separate from the validation-selected 0.5→0.20 probability threshold in §5,
+which informs a decision but does not auto-change the bands.)
 
 Every assessment is appended to `artifacts/decision_log.jsonl` with the full input,
-the decision, the model version, and a UTC timestamp.
+the decision, the model version, and a UTC timestamp. The app logs a new row
+**only when the reading actually changes**, so the trail stays meaningful instead
+of recording an identical row on every Streamlit rerun.
+
+### The four things the UI keeps distinct
+
+The app deliberately separates four ideas that are easy to conflate:
+
+1. **Model-estimated probability** — the classifier's statistical output. Not a
+   physical measurement and not a guarantee. A value of `0.000` simply means every
+   tree in the forest voted "no failure" — a coarse estimate, not a certainty.
+2. **Risk category** — a *policy band* applied to that probability (LOW/MODERATE/
+   HIGH). It routes attention; it is derived from the score, not new evidence.
+3. **Evidence completeness** — a *data-quality* status (are required fields present
+   and fresh?), independent of the score. A reading can be high-risk yet
+   incomplete, or low-risk and complete.
+4. **Verified physical machine condition** — whether the machine's true state is
+   actually known. In this prototype it is **NOT VERIFIED**: there is no physical
+   inspection and no ground-truth telemetry.
+
+### Data provenance in the UI
+
+Every reading is **manually entered** or a **simulated dataset example** — the app
+is explicit that this is *not* live industrial telemetry and that no machine has
+been inspected. The "Load example — healthy (label 0)" / "failure (label 1)"
+buttons insert labelled rows from the AI4I dataset, and a built-in comparison runs
+the model on one healthy and one failure row side by side (labelled as dataset
+examples). This makes the healthy-vs-failure contrast reproducible rather than
+implied.
 
 ---
 
@@ -233,12 +289,13 @@ forgewise/
 ├── .gitignore
 ├── data/                       # raw dataset downloaded here (git-ignored)
 ├── models/                     # trained model (git-ignored) + committed metadata
-├── artifacts/                  # metrics/figures tracked; decision log git-ignored
+├── artifacts/                  # metrics/figures + threshold_analysis.json tracked; decision log git-ignored
 ├── src/
 │   ├── __init__.py
 │   ├── data_loader.py          # download, schema validation, audit
 │   ├── train_model.py          # reproducible baseline
 │   ├── evaluate_model.py       # held-out evaluation + figures
+│   ├── calibrate_threshold.py  # validation-set threshold selection (no test tuning)
 │   ├── model_store.py          # portable load-or-train-at-startup
 │   ├── decision_engine.py      # evidence/decision rules (pure, testable)
 │   ├── predict.py              # SensorReading -> probability
@@ -248,6 +305,8 @@ forgewise/
     ├── test_decision_engine.py
     ├── test_model_store.py
     ├── test_reporting.py
+    ├── test_predictions.py     # healthy/failure examples + input sensitivity
+    ├── test_calibrate_threshold.py
     └── test_app.py
 ```
 

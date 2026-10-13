@@ -44,6 +44,14 @@ def load_metrics():
     return None
 
 
+@st.cache_data(show_spinner=False)
+def load_calibration():
+    path = ARTIFACTS / "threshold_analysis.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return None
+
+
 @st.cache_resource(show_spinner=False)
 def load_model_bundle():
     """Load the model, training from the official UCI dataset on a fresh deploy."""
@@ -70,6 +78,12 @@ st.title("ForgeWise — The Missing Evidence Engine")
 st.caption(
     "Evidence-based maintenance decision support. Model predictions are kept "
     "separate from verified facts, and missing/stale evidence is made explicit."
+)
+st.warning(
+    "**Demo data only.** Every reading in this app is **manually entered** or a "
+    "**simulated dataset example**. This is **not** live industrial telemetry, "
+    "and no physical machine has been inspected.",
+    icon="🧪",
 )
 
 try:
@@ -139,9 +153,13 @@ st.header("1. Sensor reading")
 
 col_actions = st.columns([1, 1, 2])
 with col_actions[0]:
-    load_normal = st.button("Load healthy sample", use_container_width=True)
+    load_normal = st.button("Load example — healthy (label 0)", use_container_width=True)
 with col_actions[1]:
-    load_failure = st.button("Load failure sample", use_container_width=True)
+    load_failure = st.button("Load example — failure (label 1)", use_container_width=True)
+st.caption(
+    "These buttons insert rows from the AI4I dataset (synthetic/simulated). "
+    "They are **dataset examples**, not real machine measurements."
+)
 
 if "reading" not in st.session_state:
     st.session_state.reading = {
@@ -172,6 +190,40 @@ if load_normal or load_failure:
         st.session_state.reading = _sample_row(0 if load_normal else 1)
     except Exception as exc:
         st.warning(f"Could not load a sample from the dataset: {exc}")
+
+with st.expander("Compare a healthy vs a failure dataset example"):
+    st.caption(
+        "Runs the current model on one labelled healthy row and one labelled "
+        "failure row from the AI4I dataset, side by side. Dataset examples only."
+    )
+    if st.button("Run healthy vs failure comparison"):
+        try:
+            comparison = []
+            for label, name in ((0, "healthy (label 0)"), (1, "failure (label 1)")):
+                sample = SensorReading(
+                    machine_id=name,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    **_sample_row(label),
+                )
+                p = predict.predict_probability(sample)
+                d = make_decision(sample, model_probability=p, model_version=metadata["model_version"])
+                comparison.append(
+                    {
+                        "example": name,
+                        "model_probability": round(p, 4),
+                        "risk_level": d.risk_level,
+                        "evidence_status": d.evidence_status,
+                        "decision": d.decision,
+                        "mechanism_flags": ", ".join(d.mechanism_flags) or "none",
+                    }
+                )
+            st.dataframe(comparison, use_container_width=True, hide_index=True)
+            st.caption(
+                "This is a controlled comparison of two labelled dataset rows; the "
+                "score is a model estimate for simulated inputs, not verified fact."
+            )
+        except Exception as exc:
+            st.warning(f"Comparison unavailable: {exc}")
 
 current = st.session_state.reading
 
@@ -224,15 +276,65 @@ decision = make_decision(
     model_probability=probability,
     model_version=metadata["model_version"],
 )
-log_decision(decision, reading)
+
+# Log only when the *reading* actually changes, so the audit trail stays
+# meaningful instead of recording an identical row on every Streamlit rerun.
+signature = (
+    r_type, round(air, 4), round(process, 4), round(rpm, 4), round(torque, 4),
+    round(wear, 4), machine_id, age_minutes, omit_field,
+)
+if st.session_state.get("last_logged_signature") != signature:
+    log_decision(decision, reading)
+    st.session_state["last_logged_signature"] = signature
+
+st.caption(
+    "The assessment runs automatically: the score, risk level and decision are "
+    "recomputed every time any input above changes."
+)
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Model failure probability", f"{probability:.3f}", help="A prediction, not a verified fact.")
-m2.metric("Risk level", decision.risk_level)
-m3.metric("Evidence status", decision.evidence_status)
+m1.metric(
+    "Model-estimated probability", f"{probability:.3f}",
+    help="A statistical estimate, not a physical measurement or a guarantee.",
+)
+m2.metric(
+    "Risk category", decision.risk_level,
+    help="A policy band on the probability (LOW < 0.30, HIGH >= 0.70). A routing label, not new evidence.",
+)
+m3.metric(
+    "Evidence completeness", decision.evidence_status,
+    help="Data-quality status: whether required fields are present and fresh.",
+)
 m4.metric("Decision", decision.decision)
 
 st.progress(min(max(probability, 0.0), 1.0))
+st.caption(
+    "A probability of 0.000 means every tree in the forest voted "
+    "\"no failure\" for this reading — a coarse estimate, not a physical certainty."
+)
+
+with st.expander("What these four numbers mean — they are NOT the same"):
+    st.markdown(
+        "- **Model-estimated probability** — the classifier's statistical output. "
+        "It is *not* a physical measurement and *not* a guarantee. `0.000` simply "
+        "means the model's trees all voted \"no failure\".\n"
+        "- **Risk category** — a documented *policy band* applied to that "
+        "probability (LOW < 0.30, MODERATE 0.30–0.70, HIGH ≥ 0.70). It routes "
+        "attention; it is derived from the score, not independent evidence.\n"
+        "- **Evidence completeness** — a *data-quality* status: are the required "
+        "fields present and fresh? It is independent of the score (a reading can "
+        "be high-risk yet incomplete, or low-risk and complete).\n"
+        "- **Verified physical machine condition** — whether we actually *know* "
+        "the machine's true state. In this prototype it is **NOT VERIFIED** (see "
+        "below): there is no physical inspection or ground-truth telemetry."
+    )
+
+st.info(
+    "**Verified physical machine condition: NOT VERIFIED.** ForgeWise has no "
+    "physical inspection and no ground-truth telemetry. Everything on this screen "
+    "is a model estimate over manually entered or simulated data.",
+    icon="🏭",
+)
 
 # --- evidence vs prediction ---
 col_pred, col_evi = st.columns(2)
@@ -332,3 +434,56 @@ with diag_tab:
         path = ARTIFACTS / image
         if path.exists():
             st.image(str(path), caption=image)
+
+    st.divider()
+    st.subheader("Threshold calibration (validation-selected)")
+    calibration = load_calibration()
+    if calibration:
+        val = calibration["validation"]
+        ref = calibration["held_out_test_reference"]
+        st.caption(
+            f"Selected threshold **{val['selected_threshold']}** by maximising "
+            f"{calibration['selection_metric']} on a validation split carved from the "
+            "training pool (seed "
+            f"{val['random_state']}). The held-out test set was **not** used to "
+            "select it; `artifacts/metrics.json` is unchanged."
+        )
+
+        def _row(label: str, m: dict) -> dict:
+            return {
+                "evaluation": label,
+                "threshold": m["threshold"],
+                "precision": round(m["precision"], 3),
+                "recall": round(m["recall"], 3),
+                "f1": round(m["f1"], 3),
+                "TN": m["confusion_matrix"]["true_negative"],
+                "FP": m["confusion_matrix"]["false_positive"],
+                "FN": m["confusion_matrix"]["false_negative"],
+                "TP": m["confusion_matrix"]["true_positive"],
+            }
+
+        st.markdown("**Validation split**")
+        st.dataframe(
+            [
+                _row("current (0.5)", val["metrics_at_current"]),
+                _row(f"selected ({val['selected_threshold']})", val["metrics_at_selected"]),
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.markdown("**Held-out test (reference only — not used for selection)**")
+        st.dataframe(
+            [
+                _row("current (0.5)", ref["metrics_at_current_0.5"]),
+                _row(f"selected ({val['selected_threshold']})", ref["metrics_at_selected"]),
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(ref["note"])
+        st.caption(calibration["policy_note"])
+    else:
+        st.caption(
+            "No threshold analysis found. Run `python -m src.calibrate_threshold` "
+            "to generate `artifacts/threshold_analysis.json`."
+        )

@@ -50,3 +50,47 @@ def test_app_generate_report_button_uses_offline_fallback(monkeypatch):
     assert len(at.exception) == 0, [str(e.value) for e in at.exception]
     rendered = "\n".join(m.value or "" for m in at.markdown)
     assert "Inspection Report" in rendered
+
+
+def _metric_value(at, label: str) -> str:
+    for metric in at.metric:
+        if metric.label == label:
+            return metric.value
+    raise AssertionError(f"metric {label!r} not found; have {[m.label for m in at.metric]}")
+
+
+def test_app_distinguishes_the_four_concepts():
+    at = _run_app()
+    labels = {m.label for m in at.metric}
+    assert "Model-estimated probability" in labels
+    assert "Risk category" in labels
+    assert "Evidence completeness" in labels
+    assert "Decision" in labels
+
+
+def test_app_shows_simulation_notice():
+    at = _run_app()
+    warnings = "\n".join(w.value for w in at.warning)
+    assert "Demo data only" in warnings
+
+
+def test_app_changing_input_updates_prediction():
+    at = _run_app()
+    before = float(_metric_value(at, "Model-estimated probability"))
+
+    torque = [w for w in at.number_input if w.label == "Torque [Nm]"]
+    assert torque, "torque input missing"
+    torque[0].set_value(70.0).run()
+    assert len(at.exception) == 0, [str(e.value) for e in at.exception]
+
+    after = float(_metric_value(at, "Model-estimated probability"))
+    assert after > before
+
+
+def test_app_healthy_vs_failure_comparison_runs():
+    at = _run_app()
+    buttons = [b for b in at.button if "comparison" in b.label.lower()]
+    assert buttons, "comparison button missing"
+    buttons[0].click().run()
+    assert len(at.exception) == 0, [str(e.value) for e in at.exception]
+    assert at.dataframe, "expected a comparison dataframe"

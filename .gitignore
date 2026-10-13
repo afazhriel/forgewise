@@ -23,6 +23,7 @@ models/*
 artifacts/*
 !artifacts/.gitkeep
 !artifacts/metrics.json
+!artifacts/threshold_analysis.json
 !artifacts/confusion_matrix.png
 !artifacts/roc_pr_curves.png
 
