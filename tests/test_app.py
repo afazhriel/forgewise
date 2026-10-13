@@ -160,7 +160,7 @@ def test_app_generate_report_button_uses_offline_fallback(monkeypatch):
     _goto(at, "Machine Analysis")
     _analyze(at)
     _goto(at, "AI Inspection Report")
-    _button(at, "Generate inspection report").click().run()
+    _button(at, "Generate AI Report").click().run()
     assert len(at.exception) == 0, [str(e.value) for e in at.exception]
     rendered = "\n".join(m.value or "" for m in at.markdown)
     assert "Inspection Report" in rendered

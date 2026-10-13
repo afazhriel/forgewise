@@ -30,11 +30,17 @@ navigation. Nothing is assessed until the operator presses **Analyze reading**.
 
 | View | Purpose |
 | --- | --- |
-| **Overview** | Last assessment, evidence status, model version, next recommended action |
-| **Machine Analysis** | Sensor inputs, sample loading, explicit **Analyze** action, full result panels |
-| **AI Inspection Report** | Gemini or offline-template report, with provenance shown |
-| **Decision History** | Traceable decision events (time, asset, model, score, evidence, recommendation, report mode) |
-| **Model Diagnostics** | Held-out metrics, confusion matrix, ROC/PR plots, threshold calibration, limitations |
+| **Overview** | Dashboard of the last assessment: KPI cards, the model score plotted against the documented policy bands, evidence gaps, next action, system status |
+| **Machine Analysis** | Sensor inputs in labelled cards, sample loading, explicit **Analyze reading** action, full result panels |
+| **AI Inspection Report** | Gemini or offline-template report via an explicit **Generate AI Report** button, with provenance always shown |
+| **Decision History** | Summary KPIs plus traceable decision events (time, asset, model, score, evidence, recommendation, report mode) |
+| **Model Diagnostics** | Held-out metrics, confusion matrix, ROC/PR plots, a **real** precision/recall/F1-vs-threshold chart from `threshold_analysis.json`, dataset audit, limitations |
+
+The dashboard is deliberately spare: a branded header band with honest status
+pills (model version, synthetic dataset, manual/simulated input, report provider),
+KPI cards, and a probability-vs-risk-band marker. **Every chart and number is
+derived from a committed artifact or the live model output** — there are no
+decorative buttons, placeholder charts, fake metrics, or real-time claims.
 
 Every result panel distinguishes four things that are easy to conflate:
 **model-estimated probability**, **risk category** (a policy band), **evidence
@@ -257,9 +263,19 @@ implied.
 
 Gemini is an **explanation layer**, not the predictor. `src/reporting.py` exposes a
 small provider adapter (`GeminiProvider`) that wraps the supported `google-genai`
-SDK. It reads the API key **only** from the environment (`GEMINI_API_KEY` or
-`GOOGLE_API_KEY`) or the app's password-masked session field — it is never
-hardcoded, logged, rendered, or written to the decision history.
+SDK. The key is resolved in this order and is **never** hardcoded, logged, rendered,
+or written to the decision history:
+
+1. Streamlit **Secrets** (`GEMINI_API_KEY` or `GOOGLE_API_KEY`) — the recommended
+   path for a hosted deployment;
+2. the environment (`GEMINI_API_KEY` / `GOOGLE_API_KEY`);
+3. the app's password-masked session field (a manual override).
+
+The sidebar always shows the honest provider status: *Gemini configured* (with the
+source) only after a key is found, otherwise *Gemini not configured — offline
+template*. Generation is triggered by an explicit **Generate AI Report** button (or
+an opt-in checkbox at assessment time); it is never automatic, and no request is
+made until the user asks for one.
 
 ```powershell
 $env:GEMINI_API_KEY = "your-key-here"
