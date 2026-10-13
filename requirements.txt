@@ -5,8 +5,14 @@ numpy==2.5.4
 scikit-learn==1.9.1
 joblib==1.6.0
 matplotlib==3.11.2
+Pillow==12.3.0
 streamlit==1.65.0
 pytest==9.1.1
 
 # Optional — Gemini report generation (falls back to an offline template if absent).
 google-genai==2.30.0
+
+# Optional — equipment-integration templates only (see integrations/). The app and
+# its test suite do NOT require these.
+# paho-mqtt   (integrations/mqtt_subscriber.py)
+# pymodbus    (integrations/modbus_poller.py)

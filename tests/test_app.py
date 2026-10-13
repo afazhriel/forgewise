@@ -32,7 +32,7 @@ def _run_app():
 
 
 def _goto(at, page: str):
-    at.radio[0].set_value(page).run()
+    at.radio(key="nav").set_value(page).run()
     return at
 
 
@@ -50,7 +50,7 @@ def _metric_value(at, label: str) -> str:
 
 
 def _analyze(at):
-    _button(at, "Analyze reading").click().run()
+    _button(at, "Analyze machine").click().run()
     return at
 
 
@@ -74,7 +74,15 @@ def test_app_shows_simulation_notice():
 
 def test_all_pages_render_without_exception():
     at = _run_app()
-    for page in ("Machine Analysis", "AI Inspection Report", "Decision History", "Model Diagnostics"):
+    pages = (
+        "Machine Analysis",
+        "AI Inspection Report",
+        "Visual Inspection",
+        "Equipment Integration",
+        "Decision History",
+        "Model Diagnostics",
+    )
+    for page in pages:
         _goto(at, page)
         assert len(at.exception) == 0, (page, [str(e.value) for e in at.exception])
 
@@ -168,6 +176,63 @@ def test_app_generate_report_button_uses_offline_fallback(monkeypatch):
     assert "offline deterministic template" in warnings
 
 
+def test_analyze_button_is_task_oriented():
+    at = _run_app()
+    _goto(at, "Machine Analysis")
+    labels = [b.label for b in at.button]
+    assert "Analyze machine" in labels
+    assert "Analyze reading" not in labels
+
+
+def test_report_page_labels_gemini_success_state(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from src import reporting
+
+    def _fake_success(payload, api_key=None, **kwargs):
+        return reporting.ReportResult(
+            text="# ForgeWise Inspection Report\n## Summary\nGemini output.",
+            source="gemini",
+            model_name="gemini-2.5-flash",
+        )
+
+    monkeypatch.setattr(reporting, "generate_report_result", _fake_success)
+    at = _run_app()
+    _goto(at, "Machine Analysis")
+    _analyze(at)
+    _goto(at, "AI Inspection Report")
+    _button(at, "Generate AI Report").click().run()
+    assert len(at.exception) == 0, [str(e.value) for e in at.exception]
+    successes = "\n".join(s.value for s in at.success)
+    assert "Gemini" in successes
+
+
+def test_report_page_labels_gemini_failure_state(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    from src import reporting
+
+    def _fake_failure(payload, api_key=None, **kwargs):
+        return reporting.ReportResult(
+            text="# ForgeWise Inspection Report (offline template)",
+            source="template",
+            error="503 unavailable",
+            fallback_reason=(
+                "Gemini request failed (RuntimeError); used the offline template."
+            ),
+        )
+
+    monkeypatch.setattr(reporting, "generate_report_result", _fake_failure)
+    at = _run_app()
+    _goto(at, "Machine Analysis")
+    _analyze(at)
+    _goto(at, "AI Inspection Report")
+    _button(at, "Generate AI Report").click().run()
+    assert len(at.exception) == 0, [str(e.value) for e in at.exception]
+    errors = "\n".join(e.value for e in at.error)
+    assert "failed" in errors
+    rendered = "\n".join(m.value or "" for m in at.markdown)
+    assert "Inspection Report" in rendered
+
+
 # --- decision history -------------------------------------------------------
 def test_decision_history_lists_a_record_after_analysis():
     at = _run_app()
@@ -176,3 +241,20 @@ def test_decision_history_lists_a_record_after_analysis():
     _goto(at, "Decision History")
     assert len(at.exception) == 0, [str(e.value) for e in at.exception]
     assert at.dataframe, "expected a decision-history table"
+
+
+# --- computer vision + equipment integration --------------------------------
+def test_vision_page_exposes_two_tools():
+    at = _run_app()
+    _goto(at, "Visual Inspection")
+    assert len(at.exception) == 0, [str(e.value) for e in at.exception]
+    options = at.radio(key="vision_tool").options
+    assert options == ["Image quality check", "Defect detection"]
+
+
+def test_integration_page_validates_default_payload():
+    at = _run_app()
+    _goto(at, "Equipment Integration")
+    _button(at, "Validate payload").click().run()
+    assert len(at.exception) == 0, [str(e.value) for e in at.exception]
+    assert any("Payload valid" in s.value for s in at.success)

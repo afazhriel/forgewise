@@ -3,13 +3,16 @@
 Run:
     .venv\\Scripts\\streamlit.exe run app.py
 
-A maintenance decision-support product over a deterministic pipeline:
+A maintenance decision-support product over a deterministic pipeline. The primary
+workflow is deliberately linear and explicit:
 
-* **Overview**            — last assessment dashboard, evidence status, next action
-* **Machine Analysis**    — sensor inputs, sample loading, explicit Analyze action
-* **AI Inspection Report** — Gemini or offline template, provenance always shown
-* **Decision History**    — traceable decision events (session/container log)
-* **Model Diagnostics**   — real held-out metrics, charts, calibration, limitations
+    1. Machine inputs   — enter a reading or load a synthetic dataset example
+    2. Analyze machine   — one explicit action; nothing is assessed before it
+    3. Assessment results — model estimate, policy band, evidence, decision
+    4. Optional AI report — Gemini when configured, otherwise offline template
+
+Supporting reference views (kept out of the main flow): **Decision History** and
+**Model Diagnostics**.
 
 The UI separates the *model prediction* from *verified evidence* and from
 *missing evidence*, and never presents a model estimate as a physical fact. This
@@ -28,21 +31,26 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from src import data_loader, model_store, orchestration, predict, reporting
+from src import data_loader, ingest, model_store, orchestration, predict, reporting, vision
 from src.decision_engine import SensorReading, log_decision, make_decision
 
 ROOT = Path(__file__).resolve().parent
 ARTIFACTS = ROOT / "artifacts"
 METRICS_PATH = ARTIFACTS / "metrics.json"
 LOG_PATH = ARTIFACTS / "decision_log.jsonl"
+INGEST_QUEUE_PATH = ARTIFACTS / "ingest_queue.jsonl"
 
+# Primary workflow pages first, reference pages after.
 PAGES = [
     "Overview",
     "Machine Analysis",
     "AI Inspection Report",
+    "Visual Inspection",
+    "Equipment Integration",
     "Decision History",
     "Model Diagnostics",
 ]
+REFERENCE_PAGES = {"Equipment Integration", "Decision History", "Model Diagnostics"}
 
 DEFAULT_READING = {
     "type": "M",
@@ -80,6 +88,9 @@ FIELD_LABELS = {
     "torque": "Torque [Nm]",
     "tool_wear": "Tool wear [min]",
 }
+
+ANALYZE_LABEL = "Analyze machine"
+
 
 # ---------------------------------------------------------------------------
 # Cached loaders
@@ -132,6 +143,20 @@ def recent_decisions(limit: int = 25) -> list[dict]:
     return list(reversed(records))
 
 
+def recent_ingest(limit: int = 8) -> list[dict]:
+    """Return the most recent equipment-ingestion records (newest first)."""
+    if not INGEST_QUEUE_PATH.exists():
+        return []
+    lines = INGEST_QUEUE_PATH.read_text(encoding="utf-8").strip().splitlines()
+    records = []
+    for line in lines[-limit:]:
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return list(reversed(records))
+
+
 def _sample_row(target: int) -> dict:
     df = load_dataset()
     row = df[df["Machine failure"] == target].iloc[0]
@@ -169,16 +194,22 @@ def _inject_css() -> None:
     st.markdown(
         """
         <style>
-          .block-container { padding-top: 1.6rem; max-width: 1200px; }
+          .block-container { padding-top: 1.4rem; padding-bottom: 2.5rem; max-width: 1180px; }
           h1, h2, h3, h4 { letter-spacing: -0.01em; }
           .fw-muted { color: #64748b; font-size: 0.85rem; }
+          .fw-step {
+            display: inline-block; background: #e2e8f0; color: #334155;
+            border-radius: 6px; padding: 1px 8px; font-size: 0.72rem;
+            font-weight: 800; letter-spacing: 0.03em; margin-right: 8px;
+          }
+          .fw-section { margin: 0.2rem 0 0.35rem; font-size: 1.06rem; font-weight: 700; }
 
           .fw-hero {
             background: linear-gradient(100deg, #0f172a 0%, #1e293b 55%, #1d4ed8 100%);
-            color: #f8fafc; border-radius: 16px; padding: 1.15rem 1.4rem;
-            margin-bottom: 1.1rem;
+            color: #f8fafc; border-radius: 16px; padding: 1.1rem 1.4rem;
+            margin-bottom: 1rem;
           }
-          .fw-hero-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; }
+          .fw-hero-title { font-size: 1.45rem; font-weight: 800; letter-spacing: -0.02em; }
           .fw-hero-title span { color: #93c5fd; }
           .fw-hero-sub { color: #cbd5e1; font-size: 0.9rem; margin-top: 0.15rem; }
           .fw-hero-meta { margin-top: 0.6rem; }
@@ -186,7 +217,7 @@ def _inject_css() -> None:
           .fw-pill {
             display: inline-block; padding: 3px 11px; border-radius: 999px;
             font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
-            margin-right: 6px;
+            margin: 2px 6px 2px 0;
           }
           .fw-ok   { background: #dcfce7; color: #166534; }
           .fw-warn { background: #fef3c7; color: #92400e; }
@@ -196,7 +227,7 @@ def _inject_css() -> None:
 
           .fw-band {
             position: relative; display: flex; height: 30px; border-radius: 8px;
-            overflow: hidden; border: 1px solid #e2e8f0; margin: 0.4rem 0 0.2rem;
+            overflow: hidden; border: 1px solid #e2e8f0; margin: 0.5rem 0 0.25rem;
           }
           .fw-band-seg {
             display: flex; align-items: center; justify-content: center;
@@ -209,8 +240,10 @@ def _inject_css() -> None:
             position: absolute; top: -5px; bottom: -5px; width: 3px;
             background: #0f172a; border-radius: 2px; transform: translateX(-1.5px);
           }
-          .fw-kpi-label { color: #64748b; font-size: 0.78rem; text-transform: uppercase;
-            letter-spacing: 0.04em; font-weight: 600; }
+          @media (max-width: 640px) {
+            .fw-hero-title { font-size: 1.2rem; }
+            .fw-band-seg { font-size: 9px; }
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -253,6 +286,13 @@ def _band_bar(probability: float | None) -> str:
     )
 
 
+def _step(number: str, title: str) -> None:
+    st.markdown(
+        f'<div class="fw-section"><span class="fw-step">STEP {number}</span>{title}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _goto(target: str) -> None:
     """on_click callback so CTAs can change the navigation radio safely."""
     st.session_state["nav"] = target
@@ -288,10 +328,39 @@ def _report_payload(assessment: orchestration.Assessment) -> dict:
     return payload
 
 
+def _render_report_status(report: reporting.ReportResult | None) -> None:
+    """Show an honest, unambiguous AI-report state (never assumes Gemini works)."""
+    if report is None:
+        return
+    if report.source == "gemini":
+        st.success(
+            f"AI inspection report generated by **Gemini** (`{report.model_name}`), "
+            "grounded in the assessment payload.",
+            icon="✅",
+        )
+    elif report.error:
+        st.error(
+            "AI report request **failed** — showing the offline deterministic "
+            "template instead. Reason: "
+            + (report.fallback_reason or report.error),
+            icon="⚠️",
+        )
+    else:
+        st.warning(
+            "AI report: **offline deterministic template** (Gemini not configured). "
+            + (report.fallback_reason or ""),
+            icon="ℹ️",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Startup: model bootstrap (must happen before navigation renders content)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="ForgeWise — Missing Evidence Engine", page_icon="🛠️", layout="wide")
+st.set_page_config(
+    page_title="ForgeWise — Missing Evidence Engine",
+    page_icon="🛠️",
+    layout="wide",
+)
 _inject_css()
 
 try:
@@ -316,12 +385,16 @@ metrics = load_metrics()
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: navigation + model status + Gemini configuration
+# Sidebar: navigation + model status + AI provider configuration
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### 🛠️ ForgeWise")
     st.caption("The Missing Evidence Engine")
-    page = st.radio("Navigation", PAGES, key="nav")
+
+    st.caption("**Workflow**")
+    page = st.radio("Navigation", PAGES, key="nav", label_visibility="collapsed")
+    if page in REFERENCE_PAGES:
+        st.caption("Reference view — separate from the main assessment flow.")
 
     st.divider()
     st.markdown("**Model status**")
@@ -339,7 +412,7 @@ with st.sidebar:
     st.divider()
     st.markdown("**AI report provider**")
     session_key = st.text_input(
-        "GEMINI_API_KEY (optional override)",
+        "Gemini API key (optional override)",
         type="password",
         value="",
         key="gemini_key",
@@ -350,9 +423,17 @@ with st.sidebar:
     resolved_key = (session_key or "").strip() or secret_key or env_key
     if resolved_key and reporting.gemini_available(resolved_key):
         source = "session" if (session_key or "").strip() else ("secrets" if secret_key else "environment")
-        st.success(f"Gemini configured ({source}).", icon="✅")
+        st.info(
+            f"A Gemini key was detected ({source}). Generation is attempted **only** "
+            "when you request it, and is labelled by its real source afterwards.",
+            icon="🔑",
+        )
     else:
-        st.info("Gemini not configured — AI reports use the offline template.", icon="ℹ️")
+        st.info(
+            "No Gemini key detected — AI reports use the offline deterministic "
+            "template.",
+            icon="ℹ️",
+        )
 
     st.divider()
     st.caption("Synthetic/public data — UCI AI4I 2020 (CC BY 4.0). Not live telemetry.")
@@ -363,7 +444,9 @@ def _render_hero() -> None:
     pills += _pill("Synthetic AI4I dataset", "dark")
     pills += _pill("Manual / simulated input", "dark")
     pills += _pill(
-        "AI report: Gemini" if (resolved_key and reporting.gemini_available(resolved_key)) else "AI report: offline",
+        "AI provider: key detected"
+        if (resolved_key and reporting.gemini_available(resolved_key))
+        else "AI provider: not configured",
         "dark",
     )
     st.markdown(
@@ -399,34 +482,30 @@ def render_overview() -> None:
     if assessment is None or assessment.decision is None:
         st.info(
             "No assessment yet. Open **Machine Analysis** to enter or load a "
-            "reading, then press **Analyze reading**."
+            f"reading, then press **{ANALYZE_LABEL}**."
         )
-        cta = st.columns([1, 3])
-        with cta[0]:
-            st.button(
-                "Open Machine Analysis",
-                type="primary",
-                on_click=_goto,
-                args=("Machine Analysis",),
-                use_container_width=True,
-            )
-        _render_system_status()
+        st.button(
+            "Start an assessment",
+            type="primary",
+            on_click=_goto,
+            args=("Machine Analysis",),
+        )
         return
 
     decision = assessment.decision
     prob_display = "—" if assessment.probability is None else f"{assessment.probability:.3f}"
 
+    st.markdown("**Latest assessment**")
     with st.container(border=True):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Model-estimated probability", prob_display)
         c2.metric("Risk category", decision.risk_level)
         c3.metric("Evidence completeness", decision.evidence_status)
         c4.metric("Decision", decision.decision)
-
         st.markdown(_band_bar(assessment.probability), unsafe_allow_html=True)
         st.caption(
             "The marker shows the model score against the documented policy bands. "
-            "It is a statistical estimate, not a verified physical condition."
+            "This is a statistical estimate, not a verified physical condition."
         )
 
     next_action = (
@@ -436,60 +515,40 @@ def render_overview() -> None:
     )
     left, right = st.columns([2, 1])
     with left:
-        with st.container(border=True):
-            st.markdown("**Next recommended action**")
-            st.write(next_action)
+        st.markdown("**Next recommended action**")
+        st.write(next_action)
+        if decision.evidence_gaps:
             st.markdown("**Evidence gaps**")
-            if decision.evidence_gaps:
-                for gap in decision.evidence_gaps:
-                    st.warning(gap, icon="⚠️")
-            else:
-                st.success("All required evidence present and fresh.", icon="✅")
+            for gap in decision.evidence_gaps:
+                st.warning(gap, icon="⚠️")
     with right:
-        with st.container(border=True):
-            st.markdown("**Status**")
-            tag = _pill(f"Risk {decision.risk_level}", _risk_kind(decision.risk_level))
-            tag += _pill(f"Evidence {decision.evidence_status}", _evidence_kind(decision.evidence_status))
-            if report is not None:
-                tag += _pill(
-                    "Report: Gemini" if report.source == "gemini" else "Report: offline",
-                    "note" if report.source == "gemini" else "warn",
-                )
-            st.markdown(tag, unsafe_allow_html=True)
-            st.caption(
-                "Model-estimated probability is a statistical output, not a verified "
-                "physical condition."
-            )
-            st.button(
-                "Open AI Inspection Report",
-                on_click=_goto,
-                args=("AI Inspection Report",),
-                use_container_width=True,
-            )
-
-    _render_system_status()
-
-
-def _render_system_status() -> None:
-    with st.container(border=True):
-        st.markdown("**System status**")
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Model version", metadata["model_version"][-13:])
-        d2.metric("Dataset rows", f"{metadata['dataset']['n_rows']:,}")
-        d3.metric("Positive rate", "3.4%")
-        d4.metric("Physical condition", "Not verified")
-        st.caption(
-            "Verified physical machine condition: **NOT VERIFIED**. ForgeWise has no "
-            "physical inspection and no ground-truth telemetry. Not approved for "
-            "operational machine control."
+        st.markdown("**Status**")
+        tag = _pill(f"Risk {decision.risk_level}", _risk_kind(decision.risk_level))
+        tag += _pill(
+            f"Evidence {decision.evidence_status}", _evidence_kind(decision.evidence_status)
         )
+        if report is not None:
+            tag += _pill(
+                "Report: Gemini" if report.source == "gemini" else "Report: offline",
+                "note" if report.source == "gemini" else "warn",
+            )
+        st.markdown(tag, unsafe_allow_html=True)
+        if st.button("Open AI Report", on_click=_goto, args=("AI Inspection Report",)):
+            pass
+
+    st.info(
+        "Verified physical machine condition: **NOT VERIFIED**. ForgeWise has no "
+        "physical inspection and no ground-truth telemetry, and is not approved for "
+        "operational machine control.",
+        icon="🔎",
+    )
 
 
 def render_analysis() -> None:
     st.markdown("#### Machine Analysis")
     st.caption(
-        "Enter a reading manually or load a synthetic dataset example, then run an "
-        "explicit assessment. Nothing is assessed until you press **Analyze reading**."
+        "Workflow: **1** enter machine inputs → **2** analyze machine → "
+        "**3** review the assessment → **4** optionally generate an AI report."
     )
 
     # Initialise widget state so sample loading can update the inputs.
@@ -500,17 +559,19 @@ def render_analysis() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
+    # --- STEP 1: inputs -----------------------------------------------------
+    _step("1", "Machine inputs")
     with st.container(border=True):
-        st.markdown("**Dataset examples**")
-        act = st.columns([1, 1, 2])
-        with act[0]:
-            load_normal = st.button("Load example — healthy (label 0)", use_container_width=True)
-        with act[1]:
-            load_failure = st.button("Load example — failure (label 1)", use_container_width=True)
-        st.caption(
-            "Inserts a row from the AI4I dataset (synthetic). These are **dataset "
-            "examples**, not real machine measurements."
-        )
+        load_cols = st.columns([1, 1, 2])
+        with load_cols[0]:
+            load_normal = st.button("Load example — healthy (label 0)", width="stretch")
+        with load_cols[1]:
+            load_failure = st.button("Load example — failure (label 1)", width="stretch")
+        with load_cols[2]:
+            st.caption(
+                "Optional: inserts one synthetic AI4I dataset row. These are "
+                "**dataset examples**, not real machine measurements."
+            )
 
         if load_normal or load_failure:
             try:
@@ -519,6 +580,41 @@ def render_analysis() -> None:
                     st.session_state[key] = sample[field]
             except Exception as exc:
                 st.warning(f"Could not load a sample from the dataset: {exc}")
+
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            r_type = st.selectbox("Product type", ["L", "M", "H"], key="in_type")
+            air = st.number_input("Air temperature [K]", step=0.1, format="%.1f", key="in_air")
+            process = st.number_input(
+                "Process temperature [K]", step=0.1, format="%.1f", key="in_process"
+            )
+        with c2:
+            rpm = st.number_input("Rotational speed [rpm]", step=1.0, format="%.0f", key="in_rpm")
+            torque = st.number_input("Torque [Nm]", step=0.1, format="%.1f", key="in_torque")
+            wear = st.number_input("Tool wear [min]", step=1.0, format="%.0f", key="in_wear")
+        with c3:
+            machine_id = st.text_input("Machine ID", key="in_machine")
+
+        with st.expander("Advanced: simulate evidence problems"):
+            st.caption(
+                "Used to demonstrate the Missing Evidence Engine. Leave at defaults "
+                "for a normal reading."
+            )
+            e1, e2 = st.columns(2)
+            with e1:
+                age_minutes = st.slider(
+                    "Simulated reading age (minutes)",
+                    min_value=0,
+                    max_value=240,
+                    step=5,
+                    key="in_age",
+                    help="Demonstrates stale-evidence detection.",
+                )
+            with e2:
+                omit_field = st.selectbox(
+                    "Simulate missing field (optional)", OMIT_CHOICES, key="in_omit"
+                )
 
         with st.expander("Compare a healthy vs a failure dataset example"):
             st.caption(
@@ -535,7 +631,11 @@ def render_analysis() -> None:
                             **_sample_row(label),
                         )
                         p = predict.predict_probability(sample)
-                        d = make_decision(sample, model_probability=p, model_version=metadata["model_version"])
+                        d = make_decision(
+                            sample,
+                            model_probability=p,
+                            model_version=metadata["model_version"],
+                        )
                         comparison.append(
                             {
                                 "example": name,
@@ -546,7 +646,7 @@ def render_analysis() -> None:
                                 "mechanism_flags": ", ".join(d.mechanism_flags) or "none",
                             }
                         )
-                    st.dataframe(comparison, use_container_width=True, hide_index=True)
+                    st.dataframe(comparison, width="stretch", hide_index=True)
                     st.caption(
                         "A controlled comparison of two labelled dataset rows; the score "
                         "is a model estimate for simulated inputs, not verified fact."
@@ -554,24 +654,22 @@ def render_analysis() -> None:
                 except Exception as exc:
                     st.warning(f"Comparison unavailable: {exc}")
 
-    with st.container(border=True):
-        st.markdown("**Sensor reading**")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            r_type = st.selectbox("Product type", ["L", "M", "H"], key="in_type")
-            air = st.number_input("Air temperature [K]", step=0.1, format="%.1f", key="in_air")
-            process = st.number_input("Process temperature [K]", step=0.1, format="%.1f", key="in_process")
-        with c2:
-            rpm = st.number_input("Rotational speed [rpm]", step=1.0, format="%.0f", key="in_rpm")
-            torque = st.number_input("Torque [Nm]", step=0.1, format="%.1f", key="in_torque")
-            wear = st.number_input("Tool wear [min]", step=1.0, format="%.0f", key="in_wear")
-        with c3:
-            machine_id = st.text_input("Machine ID", key="in_machine")
-            age_minutes = st.slider(
-                "Simulated reading age (minutes)", min_value=0, max_value=240, step=5,
-                key="in_age", help="Demonstrates stale-evidence detection.",
-            )
-            omit_field = st.selectbox("Simulate missing field (optional)", OMIT_CHOICES, key="in_omit")
+    # --- STEP 2: analyze ----------------------------------------------------
+    _step("2", "Analyze machine")
+    st.caption(
+        "Nothing is assessed until you run the analysis. Checking the box below "
+        "**requests an AI inspection report as part of this analysis**; it is "
+        "optional and never required."
+    )
+    gen_report = st.checkbox(
+        "Request an AI inspection report during this analysis",
+        key="in_genreport",
+        help=(
+            "Uses Gemini when a key is configured, otherwise the offline "
+            "deterministic template. The report is an explanation layer, not the "
+            "predictor."
+        ),
+    )
 
     fields = {
         "type": r_type,
@@ -584,22 +682,14 @@ def render_analysis() -> None:
     if omit_field != "(none)":
         fields[omit_field] = None
 
-    gen_report = st.checkbox(
-        "Also generate an AI report for this assessment",
-        key="in_genreport",
-        help=(
-            "Uses Gemini when configured, otherwise the offline deterministic "
-            "template. Never required for an assessment."
-        ),
-    )
-
     signature = _reading_signature(fields, machine_id, age_minutes)
-    analyze = st.button("Analyze reading", type="primary", key="btn_analyze")
+    analyze = st.button(ANALYZE_LABEL, type="primary", key="btn_analyze")
 
     if analyze:
         timestamp = (datetime.now(timezone.utc) - timedelta(minutes=age_minutes)).isoformat()
         reading = SensorReading(machine_id=machine_id, timestamp=timestamp, **fields)
-        assessment = orchestration.run_assessment(reading, metadata["model_version"])
+        with st.spinner("Running the assessment…"):
+            assessment = orchestration.run_assessment(reading, metadata["model_version"])
 
         if not assessment.ok:
             st.session_state["assessment"] = None
@@ -609,9 +699,10 @@ def render_analysis() -> None:
         else:
             result = None
             if gen_report:
-                result = reporting.generate_report_result(
-                    _report_payload(assessment), api_key=resolved_key or None
-                )
+                with st.spinner("Requesting the AI inspection report…"):
+                    result = reporting.generate_report_result(
+                        _report_payload(assessment), api_key=resolved_key or None
+                    )
             st.session_state["assessment"] = assessment
             st.session_state["report"] = result
             st.session_state["assessment_signature"] = signature
@@ -631,11 +722,14 @@ def render_analysis() -> None:
         return
 
     if not assessment.ok:
-        st.error("Input validation failed:\n\n" + "\n".join(f"- {e}" for e in assessment.input_errors))
+        st.error(
+            "Input validation failed:\n\n"
+            + "\n".join(f"- {e}" for e in assessment.input_errors)
+        )
         return
 
     if st.session_state.get("assessment_signature") != signature:
-        st.info("Inputs have changed since the last analysis — press **Analyze reading** to refresh.")
+        st.info(f"Inputs have changed since the last analysis — press **{ANALYZE_LABEL}** to refresh.")
 
     _render_results(assessment)
 
@@ -645,70 +739,86 @@ def _render_results(assessment: orchestration.Assessment) -> None:
     probability = assessment.probability
     prob_display = "—" if probability is None else f"{probability:.3f}"
 
+    # --- STEP 3: results ----------------------------------------------------
     st.divider()
-    st.markdown("### Assessment results")
-    st.caption("Recomputed from the inputs above. Model output is an estimate, not a fact.")
+    _step("3", "Assessment results")
+    st.caption(
+        "These four numbers are related but **not interchangeable**. The model "
+        "estimate is a statistical output, not a verified physical condition."
+    )
 
     with st.container(border=True):
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(
-            "Model-estimated probability", prob_display,
-            help="A statistical estimate, not a physical measurement or a guarantee.",
+            "Model-estimated probability",
+            prob_display,
+            help="The classifier's statistical output. Not a measurement, not a guarantee.",
         )
         m2.metric(
-            "Risk category", decision.risk_level,
-            help="A policy band on the probability (LOW < 0.30, HIGH >= 0.70). A routing label, not evidence.",
+            "Risk category",
+            decision.risk_level,
+            help="A policy band applied to the probability (LOW < 0.30, HIGH >= 0.70). A routing label, not evidence.",
         )
         m3.metric(
-            "Evidence completeness", decision.evidence_status,
-            help="Data-quality status: whether required fields are present and fresh.",
+            "Evidence completeness",
+            decision.evidence_status,
+            help="Data quality: whether required fields are present and fresh. Independent of the score.",
         )
         m4.metric("Decision", decision.decision)
         st.markdown(_band_bar(probability), unsafe_allow_html=True)
         st.caption(
-            "A probability of 0.000 means every tree in the forest voted \"no failure\" "
-            "— a coarse estimate, not a certainty."
+            "The marker is the model score within the documented policy bands. A "
+            "probability of 0.000 means every tree voted \"no failure\" — a coarse "
+            "estimate, not a certainty."
         )
 
-    with st.expander("What these numbers mean — they are NOT the same"):
+    st.markdown("**How to read these four numbers**")
+    read_left, read_right = st.columns(2)
+    with read_left:
         st.markdown(
-            "- **Model-estimated probability** — the classifier's statistical output. "
-            "It is *not* a physical measurement and *not* a guarantee.\n"
-            "- **Risk category** — a documented *policy band* applied to that "
-            "probability (LOW < 0.30, MODERATE 0.30–0.70, HIGH ≥ 0.70). It routes "
-            "attention; it is derived from the score, not independent evidence.\n"
-            "- **Evidence completeness** — a *data-quality* status: are required "
-            "fields present and fresh? Independent of the score.\n"
-            "- **Verified physical machine condition** — whether the machine's true "
-            "state is actually known. Here it is **NOT VERIFIED**."
+            f"**1. Model-estimated probability — `{prob_display}`**  \n"
+            "The classifier's statistical output. It is *not* a physical measurement "
+            "and *not* a guarantee.\n\n"
+            f"**2. Risk category — `{decision.risk_level}`**  \n"
+            "A documented *policy band* derived from that probability "
+            "(LOW < 0.30, MODERATE 0.30–0.70, HIGH ≥ 0.70). It routes attention; it "
+            "is not independent evidence."
+        )
+    with read_right:
+        st.markdown(
+            f"**3. Evidence completeness — `{decision.evidence_status}`**  \n"
+            "A *data-quality* status: are the required fields present and fresh? This "
+            "is independent of the model score.\n\n"
+            "**4. Operational decision — "
+            f"`{decision.decision}`**  \n"
+            "The recommended action from the documented rules. A model estimate is "
+            "**not** a verified physical condition — here it is **NOT VERIFIED**."
         )
 
-    col_pred, col_evi = st.columns(2)
-    with col_pred:
-        with st.container(border=True):
-            st.markdown("**Model prediction (estimate)**")
-            st.write(f"- Failure probability: **{prob_display}**")
-            st.write(f"- Risk category: **{decision.risk_level}**")
-            st.write(f"- Model version: `{decision.model_version}`")
-            st.write(f"- Confidence label: {decision.confidence}")
-            st.caption("Statistical output — not a verified fact.")
-    with col_evi:
-        with st.container(border=True):
-            st.markdown("**Verified evidence (measured inputs)**")
-            evidence = asdict(assessment.reading)
-            for key in FIELD_LABELS:
-                value = evidence.get(key)
-                label = "MISSING" if value is None else value
-                st.write(f"- {FIELD_LABELS[key]}: {label}")
+    ev_col, pred_col = st.columns(2)
+    with pred_col:
+        st.markdown("**Model prediction (estimate)**")
+        st.write(f"- Failure probability: **{prob_display}**")
+        st.write(f"- Risk category: **{decision.risk_level}**")
+        st.write(f"- Model version: `{decision.model_version}`")
+        st.write(f"- Confidence label: {decision.confidence}")
+        st.caption("Statistical output — not a verified fact.")
+    with ev_col:
+        st.markdown("**Verified evidence (measured inputs)**")
+        evidence = asdict(assessment.reading)
+        for key in FIELD_LABELS:
+            value = evidence.get(key)
+            shown = "MISSING" if value is None else value
+            st.write(f"- {FIELD_LABELS[key]}: {shown}")
 
+    st.markdown("**Decision & next action**")
     with st.container(border=True):
-        st.markdown("**Evidence gaps and conflicts**")
+        st.markdown(f"- **Operational decision:** {decision.decision}")
         if decision.evidence_gaps:
             for gap in decision.evidence_gaps:
                 st.warning(gap, icon="⚠️")
         else:
             st.success("All required evidence present and fresh.", icon="✅")
-
         st.markdown("**Recommended next inspection (rule-based)**")
         for check in decision.recommended_checks:
             st.markdown(f"- {check}")
@@ -727,6 +837,30 @@ def _render_results(assessment: orchestration.Assessment) -> None:
             icon="🔧",
         )
 
+    # --- STEP 4: optional report -------------------------------------------
+    st.divider()
+    _step("4", "Optional AI inspection report")
+    report = st.session_state.get("report")
+    if report is not None:
+        _render_report_status(report)
+        st.button(
+            "Open the AI report",
+            type="primary",
+            on_click=_goto,
+            args=("AI Inspection Report",),
+        )
+    else:
+        st.caption(
+            "No AI report was requested for this assessment. Generate one from the "
+            "**AI Inspection Report** page, or tick the request box in Step 2 before "
+            "analyzing."
+        )
+        st.button(
+            "Generate AI Report",
+            on_click=_goto,
+            args=("AI Inspection Report",),
+        )
+
     with st.expander("Documented mechanism heuristics (support only, not the prediction)"):
         if decision.mechanism_flags:
             for name in decision.mechanism_flags:
@@ -740,7 +874,12 @@ def _render_results(assessment: orchestration.Assessment) -> None:
 
     with st.expander("Pipeline stages"):
         for stage in assessment.stages:
-            marker = {"ok": "✅", "warning": "🟡", "error": "⛔", "skipped": "⏭️"}.get(stage.status, "•")
+            marker = {
+                "ok": "✅",
+                "warning": "🟡",
+                "error": "⛔",
+                "skipped": "⏭️",
+            }.get(stage.status, "•")
             st.markdown(f"{marker} **{stage.title}** — {stage.detail}")
 
     with st.expander("Traceability / rationale"):
@@ -752,7 +891,8 @@ def render_report() -> None:
     st.markdown("#### AI Inspection Report")
     st.caption(
         "An optional explanation layer produced by Gemini (when configured) or the "
-        "offline deterministic template. It never replaces the decision rules."
+        "offline deterministic template. It never replaces the decision rules, and "
+        "the real source is always shown."
     )
 
     assessment = st.session_state.get("assessment")
@@ -761,7 +901,7 @@ def render_report() -> None:
     if assessment is None or assessment.decision is None:
         st.info("No assessment yet. Run one from **Machine Analysis** first.")
         st.button(
-            "Open Machine Analysis",
+            "Start an assessment",
             type="primary",
             on_click=_goto,
             args=("Machine Analysis",),
@@ -769,27 +909,32 @@ def render_report() -> None:
         return
 
     if report is None:
-        st.info("No AI report generated for the latest assessment yet.")
-        if st.button("Generate AI Report", type="primary"):
-            result = reporting.generate_report_result(
-                _report_payload(assessment), api_key=resolved_key or None
+        if resolved_key and reporting.gemini_available(resolved_key):
+            st.info(
+                "A Gemini key is configured. Pressing the button below will **attempt** "
+                "a Gemini request; if it fails, the offline template is shown and the "
+                "failure is labelled.",
+                icon="🔑",
             )
+        else:
+            st.info(
+                "No Gemini key is configured — the report will use the offline "
+                "deterministic template.",
+                icon="ℹ️",
+            )
+        if st.button("Generate AI Report", type="primary"):
+            with st.spinner("Requesting the AI inspection report…"):
+                result = reporting.generate_report_result(
+                    _report_payload(assessment), api_key=resolved_key or None
+                )
             st.session_state["report"] = result
             st.rerun()
         return
 
-    if report.source == "gemini":
-        st.success(f"**Gemini-generated** (`{report.model_name}`), grounded in the assessment payload.")
-    else:
-        st.warning(
-            "**Offline fallback** — an offline deterministic template generated this "
-            "report; Gemini was not used."
-            + (f" Reason: {report.fallback_reason}" if report.fallback_reason else "")
-        )
+    _render_report_status(report)
+    st.markdown(report.text)
     if report.error:
         st.caption(f"Provider detail: {report.error}")
-
-    st.markdown(report.text)
 
     with st.expander("Report provenance"):
         st.write(f"- Source: `{report.source}`")
@@ -799,20 +944,259 @@ def render_report() -> None:
             st.write(f"- Missing sections: {', '.join(report.missing_sections)}")
 
 
+def render_vision() -> None:
+    st.markdown("#### Visual Inspection")
+    st.caption(
+        "Two separate computer-vision tools. Both run fully offline with Pillow + "
+        "NumPy and are deterministic."
+    )
+    st.warning(
+        "These tools analyse **image usability** and **visual differences** only. "
+        "They do **not** detect defects or diagnose machine condition, and every "
+        "result requires human review.",
+        icon="🧪",
+    )
+
+    tool = st.radio(
+        "Tool",
+        ["Image quality check", "Defect detection"],
+        horizontal=True,
+        key="vision_tool",
+        label_visibility="collapsed",
+    )
+    if tool == "Image quality check":
+        _render_quality_tool()
+    else:
+        _render_detection_tool()
+
+
+def _render_quality_tool() -> None:
+    st.markdown("**Tool A · Image quality check** — is this photo usable as visual evidence?")
+    uploaded = st.file_uploader(
+        "Upload a machine photo (JPG/PNG)",
+        type=["jpg", "jpeg", "png"],
+        key="vision_quality_upload",
+    )
+    if uploaded is None:
+        st.caption(
+            "Upload an image to measure resolution, brightness, contrast, sharpness "
+            "and colour balance."
+        )
+        return
+    try:
+        image = vision.load_image(uploaded.getvalue())
+        metrics = vision.analyze_quality(image)
+    except Exception as exc:
+        st.error(f"Could not read the image: {exc}")
+        return
+
+    left, right = st.columns([1, 1])
+    with left:
+        st.image(image, caption="Uploaded image", width="stretch")
+    with right:
+        if metrics.usable:
+            st.success("**USABLE** as visual evidence.", icon="✅")
+        else:
+            st.warning("**RECAPTURE recommended.**", icon="⚠️")
+        m1, m2 = st.columns(2)
+        m1.metric("Resolution", f"{metrics.width}×{metrics.height}")
+        m2.metric("Megapixels", metrics.megapixels)
+        m3, m4 = st.columns(2)
+        m3.metric("Brightness", f"{metrics.brightness:.2f}")
+        m4.metric("Contrast", f"{metrics.contrast:.2f}")
+        m5, m6 = st.columns(2)
+        m5.metric("Sharpness", f"{metrics.sharpness:.1f}")
+        m6.metric("Colour balance", f"{metrics.color_balance:.2f}")
+
+    if metrics.issues:
+        for issue in metrics.issues:
+            st.warning(issue, icon="📷")
+    st.caption(
+        "Objective image-quality measurements (an evidence-usability gate), not "
+        "defect detection. Thresholds are documented in `src/vision.py`."
+    )
+
+
+def _render_detection_tool() -> None:
+    st.markdown("**Tool B · Defect detection** — reference comparison + detector interface")
+    detector, message = vision.load_detector()
+    if detector is None:
+        st.info(message, icon="ℹ️")
+
+    st.markdown("**Reference comparison (visual difference)**")
+    st.caption(
+        "Compares a known-good reference photo with a current photo of the same view "
+        "and reports the changed fraction, mean difference, a global SSIM "
+        "approximation, and the bounding box of changes."
+    )
+    c1, c2 = st.columns(2)
+    reference = c1.file_uploader(
+        "Reference (known-good) image", type=["jpg", "jpeg", "png"], key="vision_ref"
+    )
+    current = c2.file_uploader(
+        "Current image", type=["jpg", "jpeg", "png"], key="vision_cur"
+    )
+    if reference is None or current is None:
+        st.caption("Upload both images to compare them.")
+        return
+    try:
+        result = vision.compare_images(reference.getvalue(), current.getvalue())
+    except Exception as exc:
+        st.error(f"Could not compare the images: {exc}")
+        return
+
+    verdict_kind = {
+        "NO_MATERIAL_CHANGE": ("success", "No material visual change detected."),
+        "REVIEW": ("warning", "Visual change detected — review recommended."),
+        "SIGNIFICANT_CHANGE": (
+            "error",
+            "Significant visual change detected — human review required.",
+        ),
+    }[result.verdict]
+    getattr(st, verdict_kind[0])(verdict_kind[1])
+
+    cols = st.columns([1, 1])
+    cols[0].image(reference, caption="Reference", width="stretch")
+    cols[1].image(current, caption="Current", width="stretch")
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Changed area", f"{result.changed_fraction * 100:.2f}%")
+    r2.metric("Mean abs difference", f"{result.mean_abs_diff:.1f}")
+    r3.metric("SSIM (global)", f"{result.structural_similarity:.3f}")
+    if result.bounding_box:
+        st.caption(f"Changed region (x0, y0, x1, y1): {result.bounding_box}")
+    st.caption(result.note)
+
+
+def render_integration() -> None:
+    st.markdown("#### Equipment Integration")
+    st.caption(
+        "Reference view. Four interchangeable templates let physical manufacturing "
+        "equipment feed readings into ForgeWise through one shared, unit-tested "
+        "validator."
+    )
+    st.markdown(
+        "| # | Template | Transport | Optional dependency |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 1 | `integrations/rest_ingest.py` | HTTP POST `/ingest` | none |\n"
+        "| 2 | `integrations/mqtt_subscriber.py` | MQTT subscribe | `paho-mqtt` |\n"
+        "| 3 | `integrations/modbus_poller.py` | Modbus/TCP poll | `pymodbus` |\n"
+        "| 4 | `integrations/csv_scada_import.py` | CSV batch (SCADA) | none |"
+    )
+    with st.expander("Accepted payload schema"):
+        st.code(ingest.payload_schema())
+    st.warning(
+        "These templates are examples. Add authentication, TLS, and durable storage "
+        "before any real deployment; the queue below is ephemeral on a hosted app.",
+        icon="🧪",
+    )
+
+    st.markdown("**Try a payload**")
+    st.caption(
+        "Paste a JSON object; it is validated with the same normaliser the templates "
+        "use."
+    )
+    default_payload = json.dumps(
+        {
+            "machine_id": "cnc-07",
+            "type": "M",
+            "air_temperature": 298.1,
+            "process_temperature": 308.6,
+            "rotational_speed": 1500,
+            "torque": 40.0,
+            "tool_wear": 50,
+        },
+        indent=2,
+    )
+    text = st.text_area(
+        "Payload (JSON)", value=default_payload, height=180, key="ingest_payload"
+    )
+    c1, c2 = st.columns(2)
+    validate_clicked = c1.button("Validate payload", type="primary", key="btn_validate_payload")
+    run_clicked = c2.button("Run assessment from payload", key="btn_run_payload")
+
+    if validate_clicked or run_clicked:
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            st.error(f"Invalid JSON: {exc}")
+            return
+        normalized = ingest.normalize_payload(payload)
+        if normalized.errors:
+            st.error(
+                "Payload rejected:\n\n" + "\n".join(f"- {e}" for e in normalized.errors)
+            )
+            return
+        st.success("Payload valid.", icon="✅")
+        st.json(normalized.fields)
+        for warning in normalized.warnings:
+            st.warning(warning)
+        if normalized.unknown_keys:
+            st.caption(f"Ignored unknown keys: {', '.join(normalized.unknown_keys)}")
+        if normalized.missing_fields:
+            st.info(
+                "Missing (treated as missing evidence): "
+                + ", ".join(normalized.missing_fields)
+            )
+
+        if run_clicked:
+            reading = ingest.to_reading(payload)
+            assessment = orchestration.run_assessment(reading, metadata["model_version"])
+            st.session_state["assessment"] = assessment
+            st.session_state["report"] = None
+            st.session_state["assessment_signature"] = None
+            if assessment.ok:
+                log_decision(
+                    assessment.decision, reading, log_path=LOG_PATH,
+                    extra={"report_mode": None},
+                )
+                st.success(
+                    "Assessment created from payload. Open **Overview** or "
+                    "**Machine Analysis** to review it."
+                )
+            else:
+                st.error("Assessment failed input validation.")
+
+    st.divider()
+    st.markdown("**Recent queued readings**")
+    queue_records = recent_ingest(8)
+    if queue_records:
+        st.dataframe(
+            [
+                {
+                    "Received (UTC)": (record.get("received_at") or "")[:19] + "Z",
+                    "Source": record.get("source", "—"),
+                    "Machine": (record.get("fields") or {}).get("machine_id", "—"),
+                    "Errors": len(record.get("errors") or []),
+                }
+                for record in queue_records
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.caption(
+            "No queued readings yet. A queued file appears here after you run one of "
+            "the templates (`artifacts/ingest_queue.jsonl`)."
+        )
+
+
 def render_history() -> None:
     st.markdown("#### Decision History")
     st.caption(
-        "Records are written to the app container's local filesystem. On a hosted "
-        "deployment this storage is **ephemeral** — records are lost on restart or "
-        "redeploy, and this is **not** durable audit storage."
+        "Reference view. Records are written to the app container's local "
+        "filesystem. On a hosted deployment this storage is **ephemeral** — records "
+        "are lost on restart or redeploy, and this is **not** durable audit storage."
     )
 
     records = recent_decisions(25)
     if not records:
         st.info("No decisions recorded yet. Run an assessment from **Machine Analysis**.")
         st.button(
-            "Open Machine Analysis", type="primary",
-            on_click=_goto, args=("Machine Analysis",),
+            "Start an assessment",
+            type="primary",
+            on_click=_goto,
+            args=("Machine Analysis",),
         )
         return
 
@@ -845,42 +1229,44 @@ def render_history() -> None:
                 "Report mode": extra.get("report_mode") or "—",
             }
         )
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def render_diagnostics() -> None:
     st.markdown("#### Model Diagnostics")
     st.caption(
-        "Technical detail, separated from the operator workflow. Metrics are computed "
-        "on the held-out test split only — no test-set tuning. Numbers are read from "
-        "committed artifacts; none are hand-entered."
+        "Reference view. Metrics are computed on the held-out test split only — no "
+        "test-set tuning. Numbers are read from committed artifacts; none are "
+        "hand-entered."
     )
 
     audit = load_dataset_audit()
 
     if metrics:
-        with st.container(border=True):
-            st.markdown("**Held-out test metrics**")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("ROC-AUC", f"{metrics['roc_auc']:.3f}")
-            c2.metric("PR-AUC", f"{metrics['average_precision']:.3f}")
-            c3.metric("Recall @ 0.5", f"{metrics['recall']:.3f}")
-            c4.metric("Precision @ 0.5", f"{metrics['precision']:.3f}")
-            st.caption(
-                f"n_test = {metrics['n_test']} rows · positive rate "
-                f"{metrics['positive_rate_test']*100:.1f}% · threshold {metrics['threshold']}. "
-                "Class imbalance is heavy; recall and PR-AUC are the informative metrics. "
-                "At 0.5 the model misses ~59% of failures."
-            )
+        st.markdown("**Held-out test metrics**")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("ROC-AUC", f"{metrics['roc_auc']:.3f}")
+        c2.metric("PR-AUC", f"{metrics['average_precision']:.3f}")
+        c3.metric("Recall @ 0.5", f"{metrics['recall']:.3f}")
+        c4.metric("Precision @ 0.5", f"{metrics['precision']:.3f}")
+        st.caption(
+            f"n_test = {metrics['n_test']} rows · positive rate "
+            f"{metrics['positive_rate_test']*100:.1f}% · threshold {metrics['threshold']}. "
+            "Class imbalance is heavy; recall and PR-AUC are the informative metrics. "
+            "At 0.5 the model misses ~59% of failures."
+        )
 
-            cm = metrics["confusion_matrix"]
-            cm_df = pd.DataFrame(
-                [[cm["true_negative"], cm["false_positive"]], [cm["false_negative"], cm["true_positive"]]],
-                index=["Actual 0", "Actual 1"],
-                columns=["Predicted 0", "Predicted 1"],
-            )
-            st.markdown("**Confusion matrix (held-out test)**")
-            st.dataframe(cm_df, use_container_width=True)
+        cm = metrics["confusion_matrix"]
+        cm_df = pd.DataFrame(
+            [
+                [cm["true_negative"], cm["false_positive"]],
+                [cm["false_negative"], cm["true_positive"]],
+            ],
+            index=["Actual 0", "Actual 1"],
+            columns=["Predicted 0", "Predicted 1"],
+        )
+        st.markdown("**Confusion matrix (held-out test)**")
+        st.dataframe(cm_df, width="stretch")
     else:
         st.info("No committed metrics found (`artifacts/metrics.json`).")
 
@@ -927,7 +1313,8 @@ def render_diagnostics() -> None:
                 _row("current (0.5)", val["metrics_at_current"]),
                 _row(f"selected ({val['selected_threshold']})", val["metrics_at_selected"]),
             ],
-            use_container_width=True, hide_index=True,
+            width="stretch",
+            hide_index=True,
         )
         st.markdown("**Held-out test (reference only)**")
         st.dataframe(
@@ -935,7 +1322,8 @@ def render_diagnostics() -> None:
                 _row("current (0.5)", ref["metrics_at_current_0.5"]),
                 _row(f"selected ({val['selected_threshold']})", ref["metrics_at_selected"]),
             ],
-            use_container_width=True, hide_index=True,
+            width="stretch",
+            hide_index=True,
         )
         st.caption(ref["note"])
         st.caption(calibration["policy_note"])
@@ -967,6 +1355,8 @@ PAGE_RENDERERS = {
     "Overview": render_overview,
     "Machine Analysis": render_analysis,
     "AI Inspection Report": render_report,
+    "Visual Inspection": render_vision,
+    "Equipment Integration": render_integration,
     "Decision History": render_history,
     "Model Diagnostics": render_diagnostics,
 }

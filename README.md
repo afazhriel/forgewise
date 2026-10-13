@@ -26,26 +26,36 @@ on missing data. ForgeWise refuses to hide that gap.
 ## 1a. Product shell
 
 The Streamlit app is a small industrial-style product shell with sidebar
-navigation. Nothing is assessed until the operator presses **Analyze reading**.
+navigation. Nothing is assessed until the operator presses **Analyze machine**.
+The primary flow is explicit and linear: **1** enter machine inputs → **2**
+analyze machine → **3** review the assessment → **4** optionally generate an AI
+report. Visual Inspection and Equipment Integration extend that flow; Decision
+History and Model Diagnostics are reference views kept out of the main flow.
 
 | View | Purpose |
 | --- | --- |
-| **Overview** | Dashboard of the last assessment: KPI cards, the model score plotted against the documented policy bands, evidence gaps, next action, system status |
-| **Machine Analysis** | Sensor inputs in labelled cards, sample loading, explicit **Analyze reading** action, full result panels |
-| **AI Inspection Report** | Gemini or offline-template report via an explicit **Generate AI Report** button, with provenance always shown |
-| **Decision History** | Summary KPIs plus traceable decision events (time, asset, model, score, evidence, recommendation, report mode) |
-| **Model Diagnostics** | Held-out metrics, confusion matrix, ROC/PR plots, a **real** precision/recall/F1-vs-threshold chart from `threshold_analysis.json`, dataset audit, limitations |
+| **Overview** | Last assessment summary: KPI cards, the model score plotted against the documented policy bands, evidence gaps, next action |
+| **Machine Analysis** | Sensor inputs grouped in cards, sample loading, explicit **Analyze machine** action, a three-part result hierarchy, optional report request |
+| **AI Inspection Report** | Gemini or offline-template report via an explicit **Generate AI Report** button, with distinct loading/success/failure states and real provenance |
+| **Visual Inspection** | Two classical-CV tools (distinct tool buttons): an **image-quality check** and a **reference-comparison** difference detector, plus a detector interface |
+| **Equipment Integration** | Reference view: four equipment templates (REST/MQTT/Modbus/CSV), a live payload validator, and the ingestion queue |
+| **Decision History** | Reference view: summary KPIs plus traceable decision events (time, asset, model, score, evidence, recommendation, report mode) |
+| **Model Diagnostics** | Reference view: held-out metrics, confusion matrix, ROC/PR plots, a **real** precision/recall/F1-vs-threshold chart from `threshold_analysis.json`, dataset audit, limitations |
 
-The dashboard is deliberately spare: a branded header band with honest status
-pills (model version, synthetic dataset, manual/simulated input, report provider),
-KPI cards, and a probability-vs-risk-band marker. **Every chart and number is
-derived from a committed artifact or the live model output** — there are no
-decorative buttons, placeholder charts, fake metrics, or real-time claims.
+The UI is deliberately spare: a branded header band with honest status pills
+(model version, synthetic dataset, manual/simulated input, AI provider
+configuration), KPI cards, and a probability-vs-risk-band marker. **Every chart
+and number is derived from a committed artifact or the live model output** —
+there are no decorative buttons, placeholder charts, fake metrics, or real-time
+claims. A detected Gemini key is reported as *configuration only*; the app never
+claims Gemini "works" until a real request has actually succeeded.
 
-Every result panel distinguishes four things that are easy to conflate:
-**model-estimated probability**, **risk category** (a policy band), **evidence
-completeness** (data quality), and **verified physical machine condition** (here:
-*NOT VERIFIED* — there is no physical inspection or ground-truth telemetry).
+The results hierarchy separates the four things that are easy to conflate and
+states each explicitly:
+**model-estimated probability** (a statistical estimate), **risk category** (a
+policy band derived from it), **evidence completeness** (data quality), and the
+**operational decision** (rule-based). It also states plainly that the verified
+physical machine condition is **NOT VERIFIED**.
 
 ## 1b. Architecture & workflow
 
@@ -102,7 +112,10 @@ Linux/macOS use the activated venv's `python` / `streamlit` directly
 ```
 
 Pinned dependencies (also see `requirements.txt`): pandas, numpy, scikit-learn,
-joblib, matplotlib, streamlit, pytest, and the optional `google-genai`.
+joblib, matplotlib, **Pillow** (computer-vision tools), streamlit, pytest, and the
+optional `google-genai`. The equipment templates additionally support optional
+`paho-mqtt` (MQTT) and `pymodbus` (Modbus); neither is required by the app or its
+tests.
 
 ---
 
@@ -224,8 +237,8 @@ which informs a decision but does not auto-change the bands.)
 
 Every assessment is appended to `artifacts/decision_log.jsonl` with the full input,
 the decision, the model version, a UTC timestamp, and the report mode
-(`gemini` / `template`). Each **explicit Analyze action** writes one record; the
-log is no longer written on every UI rerun.
+(`gemini` / `template`). Each **explicit Analyze machine action** writes one record;
+the log is no longer written on every UI rerun.
 
 > **Durability.** On a hosted deployment the log lives on the app container's
 > ephemeral filesystem and is lost on restart or redeploy — it is **not** durable
@@ -259,6 +272,68 @@ implied.
 
 ---
 
+## 6a. Computer vision (classical, offline)
+
+`src/vision.py` provides **two** deterministic, offline tools (Pillow + NumPy
+only — no OpenCV, no network, no trained model). They are exposed as two distinct
+tools on the **Visual Inspection** page, and neither one diagnoses a machine or
+claims to detect defects:
+
+1. **Image quality / usability** — resolution, brightness, contrast, sharpness
+   (variance of the Laplacian) and colour balance, with a **`USABLE` /
+   `RECAPTURE`** verdict. This is an evidence-usability gate, the visual analogue
+   of the sensor completeness checks.
+2. **Reference comparison / visual difference** — compares a known-good reference
+   photo against a current photo of the same view and reports the changed
+   fraction, mean absolute difference, a *global* SSIM approximation, and the
+   bounding box of changes. This is classical change detection: it reports
+   **visual differences**, not defect names, and always requires human review.
+
+A **detector interface** (`load_detector`) is included for a future trained model,
+but it deliberately returns *"no defect-detection model is installed"* until a
+model artifact **and** a supported runtime are actually present. The UI never
+fabricates detections.
+
+Thresholds are documented constants in `src/vision.py` and are covered by
+`tests/test_vision.py` using synthetic images (noise vs. blurred vs. dark vs.
+tiny; identical vs. altered reference).
+
+## 6b. Equipment integration templates
+
+`integrations/` contains **four** starting-point templates so physical
+manufacturing equipment can feed readings into ForgeWise. Every template validates
+incoming data with the shared, unit-tested normaliser in `src/ingest.py` and
+appends valid readings to one queue (`artifacts/ingest_queue.jsonl`, git-ignored).
+
+| # | Template | Transport | Optional dependency |
+| --- | --- | --- | --- |
+| 1 | `integrations/rest_ingest.py` | HTTP POST `/ingest` | none (stdlib) |
+| 2 | `integrations/mqtt_subscriber.py` | MQTT subscribe | `paho-mqtt` |
+| 3 | `integrations/modbus_poller.py` | Modbus/TCP poll (OPC-UA-style mapping) | `pymodbus` |
+| 4 | `integrations/csv_scada_import.py` | CSV batch (SCADA/MES export) | none (pandas) |
+
+The **Equipment Integration** page documents the payload schema, lets you paste a
+JSON payload and **validate it live** with the same normaliser, and can run an
+assessment directly from a valid payload. The optional `paho-mqtt` / `pymodbus`
+dependencies are **not** required by the app or its test suite.
+
+The payload schema (case-insensitive; aliases accepted):
+
+```json
+{
+  "machine_id": "cnc-07", "type": "M",
+  "air_temperature": 298.1, "process_temperature": 308.6,
+  "rotational_speed": 1500, "torque": 40.0, "tool_wear": 50
+}
+```
+
+A **missing** sensor field becomes *missing evidence* (`INCOMPLETE`), not an error;
+non-numeric values and unknown product types are errors; unknown extra keys are
+reported but ignored. These templates are examples — add authentication, TLS, and
+durable storage before any real deployment.
+
+---
+
 ## 7. Gemini report (optional)
 
 Gemini is an **explanation layer**, not the predictor. `src/reporting.py` exposes a
@@ -271,11 +346,19 @@ or written to the decision history:
 2. the environment (`GEMINI_API_KEY` / `GOOGLE_API_KEY`);
 3. the app's password-masked session field (a manual override).
 
-The sidebar always shows the honest provider status: *Gemini configured* (with the
-source) only after a key is found, otherwise *Gemini not configured — offline
-template*. Generation is triggered by an explicit **Generate AI Report** button (or
-an opt-in checkbox at assessment time); it is never automatic, and no request is
-made until the user asks for one.
+The sidebar always reports the provider **configuration** honestly: *a Gemini key
+was detected* (with the source) once a key is found, otherwise *no Gemini key
+detected — offline template*. A detected key is **not** a claim that Gemini works;
+the app only states *Gemini-generated* after a real request has returned and passed
+validation. Generation is triggered by an explicit **Generate AI Report** button
+(or an opt-in checkbox that requests a report during analysis); it is never
+automatic, and no request is made until the user asks for one.
+
+The report UI shows three distinct states — a **loading** spinner while the request
+is in flight, a **success** banner naming Gemini when a validated Gemini response is
+used, and a **failure** banner when the request errored (it then shows the offline
+template and the failure reason), or an informational banner when no key is
+configured. A configured key never, by itself, changes the reported outcome.
 
 ```powershell
 $env:GEMINI_API_KEY = "your-key-here"
@@ -364,7 +447,12 @@ forgewise/
 ├── .streamlit/config.toml      # restrained light theme
 ├── data/                       # raw dataset downloaded here (git-ignored)
 ├── models/                     # trained model (git-ignored) + committed metadata
-├── artifacts/                  # metrics/figures + threshold_analysis.json tracked; decision log git-ignored
+├── artifacts/                  # metrics/figures + threshold_analysis.json tracked; logs/queues git-ignored
+├── integrations/               # 4 equipment templates (REST, MQTT, Modbus, CSV) + README
+│   ├── rest_ingest.py
+│   ├── mqtt_subscriber.py
+│   ├── modbus_poller.py
+│   └── csv_scada_import.py
 ├── src/
 │   ├── __init__.py
 │   ├── data_loader.py          # download, schema validation, audit
@@ -375,6 +463,8 @@ forgewise/
 │   ├── model_store.py          # portable load-or-train-at-startup
 │   ├── decision_engine.py      # evidence/decision rules (pure, testable)
 │   ├── predict.py              # SensorReading -> probability
+│   ├── vision.py               # classical CV: image quality + reference comparison
+│   ├── ingest.py               # shared equipment-payload normaliser
 │   └── reporting.py            # Gemini provider adapter + offline template
 └── tests/
     ├── test_data_validation.py
@@ -384,7 +474,10 @@ forgewise/
     ├── test_predictions.py     # healthy/failure examples + input sensitivity
     ├── test_calibrate_threshold.py
     ├── test_orchestration.py   # pipeline stages + input validation + human review
-    └── test_app.py             # navigation, analyze flow, evidence states, history
+    ├── test_vision.py          # image-quality + reference-comparison metrics
+    ├── test_ingest.py          # payload normaliser
+    ├── test_integrations.py    # the 4 equipment templates
+    └── test_app.py             # navigation, analyze flow, evidence states, report states, history
 ```
 
 ---
