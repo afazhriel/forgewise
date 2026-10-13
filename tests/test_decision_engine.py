@@ -153,3 +153,12 @@ def test_log_decision_writes_jsonl(tmp_path):
     assert record["decision"]["model_version"] == decision.model_version
     assert record["reading"]["reading_id"] == reading.reading_id
     assert "created_at" in record["decision"]
+
+
+def test_log_decision_accepts_extra_provenance(tmp_path):
+    reading = _fresh_reading()
+    decision = de.make_decision(reading, model_probability=0.9)
+    log_path = tmp_path / "decision_log.jsonl"
+    de.log_decision(decision, reading, log_path=log_path, extra={"report_mode": "template"})
+    record = json.loads(log_path.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert record["extra"] == {"report_mode": "template"}

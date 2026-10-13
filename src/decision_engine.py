@@ -370,8 +370,13 @@ def log_decision(
     decision: Decision,
     reading: SensorReading,
     log_path: str | Path = "artifacts/decision_log.jsonl",
+    extra: dict | None = None,
 ) -> Path:
-    """Append a full audit record (inputs, output, version, timestamp)."""
+    """Append a full audit record (inputs, output, version, timestamp).
+
+    ``extra`` lets the orchestration layer attach provenance such as the report
+    mode (``gemini`` / ``template``) without changing the decision schema.
+    """
     path = Path(log_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -379,6 +384,8 @@ def log_decision(
         "reading": asdict(reading),
         "decision": asdict(decision),
     }
+    if extra:
+        record["extra"] = extra
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
     return path

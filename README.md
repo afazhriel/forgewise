@@ -23,6 +23,43 @@ on missing data. ForgeWise refuses to hide that gap.
 
 ---
 
+## 1a. Product shell
+
+The Streamlit app is a small industrial-style product shell with sidebar
+navigation. Nothing is assessed until the operator presses **Analyze reading**.
+
+| View | Purpose |
+| --- | --- |
+| **Overview** | Last assessment, evidence status, model version, next recommended action |
+| **Machine Analysis** | Sensor inputs, sample loading, explicit **Analyze** action, full result panels |
+| **AI Inspection Report** | Gemini or offline-template report, with provenance shown |
+| **Decision History** | Traceable decision events (time, asset, model, score, evidence, recommendation, report mode) |
+| **Model Diagnostics** | Held-out metrics, confusion matrix, ROC/PR plots, threshold calibration, limitations |
+
+Every result panel distinguishes four things that are easy to conflate:
+**model-estimated probability**, **risk category** (a policy band), **evidence
+completeness** (data quality), and **verified physical machine condition** (here:
+*NOT VERIFIED* — there is no physical inspection or ground-truth telemetry).
+
+## 1b. Architecture & workflow
+
+Presentation (`app.py`) is kept separate from the deterministic pipeline
+(`src/orchestration.py`). An assessment runs through explicit stages:
+
+1. **Input validation** — structural checks (unknown product type, non-finite values).
+2. **Model inference** — `src/predict.py` runs the existing RandomForest.
+3. **Evidence completeness & freshness** — `src/decision_engine.py`.
+4. **Decision rules** — the documented risk/decision mapping.
+5. **Follow-up checks** — permitted, rule-based checks only.
+6. **Optional report** — `src/reporting.py`; Gemini if configured, else offline template.
+7. **Traceable decision event** — appended to the local decision log.
+
+Each stage records its own status (`ok` / `warning` / `error` / `skipped`), so the
+workflow is transparent and testable. There is no agent framework and no
+autonomy: the LLM never bypasses the deterministic rules or overrides the model.
+
+---
+
 ## 2. Dataset
 
 * **Name:** AI4I 2020 Predictive Maintenance Dataset
@@ -180,9 +217,13 @@ are separate from the validation-selected 0.5→0.20 probability threshold in §
 which informs a decision but does not auto-change the bands.)
 
 Every assessment is appended to `artifacts/decision_log.jsonl` with the full input,
-the decision, the model version, and a UTC timestamp. The app logs a new row
-**only when the reading actually changes**, so the trail stays meaningful instead
-of recording an identical row on every Streamlit rerun.
+the decision, the model version, a UTC timestamp, and the report mode
+(`gemini` / `template`). Each **explicit Analyze action** writes one record; the
+log is no longer written on every UI rerun.
+
+> **Durability.** On a hosted deployment the log lives on the app container's
+> ephemeral filesystem and is lost on restart or redeploy — it is **not** durable
+> audit storage. For production, point the log at managed storage.
 
 ### The four things the UI keeps distinct
 
@@ -214,17 +255,34 @@ implied.
 
 ## 7. Gemini report (optional)
 
-`src/reporting.py` can produce the inspection report with Google Gemini. It reads
-the API key **only** from the environment (`GEMINI_API_KEY` or `GOOGLE_API_KEY`) or
-the app's session field — it is never hardcoded or logged.
+Gemini is an **explanation layer**, not the predictor. `src/reporting.py` exposes a
+small provider adapter (`GeminiProvider`) that wraps the supported `google-genai`
+SDK. It reads the API key **only** from the environment (`GEMINI_API_KEY` or
+`GOOGLE_API_KEY`) or the app's password-masked session field — it is never
+hardcoded, logged, rendered, or written to the decision history.
 
 ```powershell
 $env:GEMINI_API_KEY = "your-key-here"
 ```
 
-With no key/SDK, ForgeWise falls back to a deterministic, fully offline template
-report, so the demo always works. The prompt is grounded in the exact evidence
-payload and instructs the model to separate evidence, predictions, and missing data.
+Key behaviours:
+
+* **Grounded prompt** — the payload (reading + decision) is supplied verbatim; the
+  system instruction forbids inventing sensor values, failure causes, inspection
+  history, or maintenance actions.
+* **Structured-output validation** — the response must contain the expected
+  sections (Summary, Risk, Evidence, Missing, Recommended, Limitations, Human
+  verification). Empty, truncated, or malformed output is rejected.
+* **Explicit provenance** — every report is labelled **Gemini** or **offline
+  deterministic template**; a fallback is never mislabelled as Gemini, and the
+  fallback reason (missing key, API error, malformed output) is shown.
+* **Graceful degradation** — missing credentials, SDK import errors, API errors,
+  and timeouts all fall back to the template (never a crash). With no key/SDK the
+  offline template always works, so the demo needs no paid service.
+
+The provider is injectable (`provider=...`) so the test suite exercises success,
+API-error, and malformed-output paths with a fake client — **no live API call is
+ever made during development or tests**.
 
 ---
 
@@ -281,12 +339,13 @@ invent one.
 
 ```text
 forgewise/
-├── app.py                      # Streamlit UI (deployment entrypoint)
+├── app.py                      # Streamlit product shell (deployment entrypoint)
 ├── conftest.py                 # makes `src` importable under pytest
 ├── runtime.txt                 # python-3.12 for Streamlit Community Cloud
 ├── requirements.txt
 ├── README.md
 ├── .gitignore
+├── .streamlit/config.toml      # restrained light theme
 ├── data/                       # raw dataset downloaded here (git-ignored)
 ├── models/                     # trained model (git-ignored) + committed metadata
 ├── artifacts/                  # metrics/figures + threshold_analysis.json tracked; decision log git-ignored
@@ -296,18 +355,20 @@ forgewise/
 │   ├── train_model.py          # reproducible baseline
 │   ├── evaluate_model.py       # held-out evaluation + figures
 │   ├── calibrate_threshold.py  # validation-set threshold selection (no test tuning)
+│   ├── orchestration.py        # deterministic, stage-annotated assessment pipeline
 │   ├── model_store.py          # portable load-or-train-at-startup
 │   ├── decision_engine.py      # evidence/decision rules (pure, testable)
 │   ├── predict.py              # SensorReading -> probability
-│   └── reporting.py            # Gemini report + offline template
+│   └── reporting.py            # Gemini provider adapter + offline template
 └── tests/
     ├── test_data_validation.py
     ├── test_decision_engine.py
     ├── test_model_store.py
-    ├── test_reporting.py
+    ├── test_reporting.py       # provider adapter, validation, fallback
     ├── test_predictions.py     # healthy/failure examples + input sensitivity
     ├── test_calibrate_threshold.py
-    └── test_app.py
+    ├── test_orchestration.py   # pipeline stages + input validation + human review
+    └── test_app.py             # navigation, analyze flow, evidence states, history
 ```
 
 ---
