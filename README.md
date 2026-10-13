@@ -48,7 +48,10 @@ To fetch it:
 
 ## 3. Setup
 
-Requires **Python 3.12.x** (tested on 3.12.10) on Windows.
+Requires **Python 3.12.x** (tested on 3.12.10). All paths use `pathlib` and work
+on Linux, macOS, and Windows. Commands below are Windows PowerShell; on
+Linux/macOS use the activated venv's `python` / `streamlit` directly
+(e.g. `python -m streamlit run app.py`).
 
 ```powershell
 # from C:\Dev\forgewise
@@ -93,7 +96,10 @@ never re-tuned), a dataset SHA-256 recorded in the model metadata, and an explic
   `Rotational speed [rpm]`, `Torque [Nm]`, `Tool wear [min]`.
 * **Excluded (leakage):** `UDI`, `Product ID`, and the failure-mode flags
   `TWF/HDF/PWF/OSF/RNF` (they directly encode the label).
-* **Model version (this build):** `fw-20261013T074119Z-dc6630cd`.
+* **Model version (this build):** `fw-20261013T074119Z-dc6630cd` (committed
+  reference run). A fresh deployment **retrains deterministically** with the same
+  configuration and reproduces the metrics below under a new timestamped version
+  string, because the model binary itself is not committed (see §8).
 
 Held-out test metrics (2,000 rows, 3.4% positive) — actual values from
 `artifacts/metrics.json`:
@@ -166,34 +172,88 @@ payload and instructs the model to separate evidence, predictions, and missing d
 
 ---
 
-## 8. Project layout
+## 8. Deploy to Streamlit Community Cloud
+
+The repository is ready to deploy as a public Streamlit app.
+
+* **Repository:** `afazhriel/forgewise`
+* **Branch:** `main`
+* **Entrypoint (main file path):** `app.py`
+* **Python version:** 3.12 (pinned via `runtime.txt` → `python-3.12`)
+* **Dependencies:** installed from `requirements.txt` (already pinned)
+
+### Startup model behaviour
+
+The trained model binary (`models/model.joblib`, ~15 MB) is **not** committed.
+On a fresh deployment `src/model_store.py`:
+
+1. reuses `models/model.joblib` when present (local development); otherwise
+2. trains the deterministic baseline from the official UCI AI4I dataset, which
+   `src/data_loader.py` downloads over HTTPS on first run, then caches the model
+   in-process (and writes it to `models/`).
+
+The first request is therefore slower (dataset download + training, typically
+well under a minute); later requests reuse the cached model. If the dataset
+cannot be reached, the app shows a clear, actionable error instead of crashing.
+Only the official UCI archive is contacted — no executable artifacts are fetched
+from untrusted sources, and the schema is validated before training.
+
+> Because the model is retrained at deploy time, its *version string* differs
+> from the committed reference run, but the metrics are identical (same seed,
+> features, and split — verified by reproducing `artifacts/metrics.json` from a
+> fresh training run).
+
+### Steps
+
+1. Go to <https://share.streamlit.io> and sign in with GitHub.
+2. **New app** → select repository `afazhriel/forgewise`, branch `main`, main
+   file path `app.py`.
+3. (Optional) Under **Advanced settings → Secrets**, add a Gemini key to enable
+   the LLM report path:
+   ```toml
+   GEMINI_API_KEY = "your-key-here"
+   ```
+   Without it, the app uses the offline template report. Never commit this key.
+4. Deploy. No `.env`, committed dataset, or committed model binary is required.
+
+The public app URL is assigned by Streamlit on deploy; this document does not
+invent one.
+
+---
+
+## 9. Project layout
 
 ```text
 forgewise/
-├── app.py                      # Streamlit UI
+├── app.py                      # Streamlit UI (deployment entrypoint)
 ├── conftest.py                 # makes `src` importable under pytest
+├── runtime.txt                 # python-3.12 for Streamlit Community Cloud
 ├── requirements.txt
 ├── README.md
 ├── .gitignore
-├── data/                       # raw dataset lives here (git-ignored)
-├── models/                     # trained model + metadata (git-ignored)
-├── artifacts/                  # metrics, figures, decision log (git-ignored)
+├── data/                       # raw dataset downloaded here (git-ignored)
+├── models/                     # trained model (git-ignored) + committed metadata
+├── artifacts/                  # metrics/figures tracked; decision log git-ignored
 ├── src/
 │   ├── __init__.py
 │   ├── data_loader.py          # download, schema validation, audit
 │   ├── train_model.py          # reproducible baseline
 │   ├── evaluate_model.py       # held-out evaluation + figures
+│   ├── model_store.py          # portable load-or-train-at-startup
 │   ├── decision_engine.py      # evidence/decision rules (pure, testable)
 │   ├── predict.py              # SensorReading -> probability
 │   └── reporting.py            # Gemini report + offline template
 └── tests/
     ├── test_data_validation.py
-    └── test_decision_engine.py
+    ├── test_decision_engine.py
+    ├── test_model_store.py
+    ├── test_reporting.py
+    └── test_app.py
 ```
 
 ---
 
-## 9. License / attribution
+## 10. License / attribution
 
 Dataset © UCI Machine Learning Repository, licensed **CC BY 4.0**. ForgeWise source
 code is provided for the AI Builder Cup 2026 prototype.

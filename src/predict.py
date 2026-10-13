@@ -6,11 +6,9 @@ model output is a *prediction*; the decision engine decides what to do with it.
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import pandas as pd
 
-from src import data_loader, train_model
+from src import data_loader, model_store
 from src.decision_engine import SensorReading
 
 # Maps SensorReading attribute -> dataset feature column name.
@@ -24,9 +22,9 @@ _FIELD_TO_COLUMN = {
 }
 
 
-@lru_cache(maxsize=1)
 def _load() -> tuple[object, dict]:
-    return train_model.load_model()
+    # Delegates to the portable loader (loads an artifact, or trains + caches).
+    return model_store.get_model()
 
 
 def reading_to_frame(reading: SensorReading) -> pd.DataFrame:

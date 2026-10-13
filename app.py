@@ -18,7 +18,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src import data_loader, predict, reporting
+from src import data_loader, model_store, predict, reporting
 from src.decision_engine import SensorReading, log_decision, make_decision
 
 ROOT = Path(__file__).resolve().parent
@@ -44,16 +44,10 @@ def load_metrics():
     return None
 
 
-def model_ready() -> bool:
-    from src.train_model import METADATA_PATH, MODEL_PATH
-
-    return MODEL_PATH.exists() and METADATA_PATH.exists()
-
-
-def load_metadata():
-    from src.train_model import METADATA_PATH
-
-    return json.loads(METADATA_PATH.read_text(encoding="utf-8"))
+@st.cache_resource(show_spinner=False)
+def load_model_bundle():
+    """Load the model, training from the official UCI dataset on a fresh deploy."""
+    return model_store.get_model()
 
 
 def recent_decisions(limit: int = 8) -> list[dict]:
@@ -78,14 +72,24 @@ st.caption(
     "separate from verified facts, and missing/stale evidence is made explicit."
 )
 
-if not model_ready():
-    st.error(
-        "No trained model found. Run training first:\n\n"
-        "`.\\.venv\\Scripts\\python.exe -m src.train_model`"
+try:
+    with st.spinner(
+        "Preparing model… on a fresh deployment this trains the baseline from "
+        "the official UCI AI4I dataset (one-time, then cached)."
+    ):
+        _pipeline, metadata = load_model_bundle()
+except model_store.ModelUnavailable as exc:
+    st.error("ForgeWise could not start: no trained model is available.")
+    st.write(str(exc))
+    st.info(
+        "Train locally with `python -m src.train_model`, or confirm the app can "
+        "reach the official UCI dataset URL and redeploy."
     )
     st.stop()
+except Exception as exc:  # unexpected startup failure
+    st.error(f"Unexpected startup error while preparing the model: {exc}")
+    st.stop()
 
-metadata = load_metadata()
 metrics = load_metrics()
 
 # ---------------------------------------------------------------------------
@@ -108,6 +112,10 @@ with st.sidebar:
         c3, c4 = st.columns(2)
         c3.metric("Recall", f"{metrics['recall']:.3f}")
         c4.metric("Precision", f"{metrics['precision']:.3f}")
+        st.caption(
+            "Reference held-out evaluation (committed). The runtime model is "
+            "reconstructed from the same deterministic configuration."
+        )
         st.caption(metrics["note"])
 
     st.divider()
@@ -159,10 +167,11 @@ def _sample_row(target: int) -> dict:
     }
 
 
-if load_normal:
-    st.session_state.reading = _sample_row(0)
-if load_failure:
-    st.session_state.reading = _sample_row(1)
+if load_normal or load_failure:
+    try:
+        st.session_state.reading = _sample_row(0 if load_normal else 1)
+    except Exception as exc:
+        st.warning(f"Could not load a sample from the dataset: {exc}")
 
 current = st.session_state.reading
 
